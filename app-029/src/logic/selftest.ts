@@ -8,6 +8,7 @@ import { computeLed } from './led'
 import { clearGeometryCache, ensureFont, findFont, getGlyphGeom } from './fontLoader'
 import { computeLayout, defaultProject, textToItems, type LayoutResult } from './layout'
 import { assertBomSum, buildBom, compareMaterials, defaultPreset, type Preset } from './materials'
+import { assertBatchAllocation, assertRegionsWhole, planBatchNesting, letPolicyLabel } from './batchNesting'
 import { nestPieces, type Piece } from './nesting'
 import { runBlockCount, type BlockCountResult } from './testRunner'
 import type { LayoutDef, Project } from './types'
@@ -375,6 +376,57 @@ export async function runAcceptance(preset: Preset = defaultPreset): Promise<Acc
       pass: cmp.every((c) => c.totalCents === c.panelCents + c.ledCents + c.psuCents + c.accessoryCents + c.laborCents),
       detail: `${cmp.length} 种材质`,
       evidence: cmp.map((c) => `${c.name}：面板 ${(c.panelCents / 100).toFixed(2)} + LED ${(c.ledCents / 100).toFixed(2)} + 电源 ${(c.psuCents / 100).toFixed(2)} + 配件 ${(c.accessoryCents / 100).toFixed(2)} + 加工 ${(c.laborCents / 100).toFixed(2)} = ¥${(c.totalCents / 100).toFixed(2)}`)
+    })
+  }
+
+  // ---------- 11. 集中开料（多门头同批拼版） ----------
+  {
+    const mkPieces = (prefix: string, defs: Array<[number, number]>) => defs.map(([w, h], i) => ({ id: `${prefix}${i}`, label: `${prefix}-${i + 1}`, wMm: w, hMm: h }))
+    const W = 1220
+    const H = 2440
+    const KERF = 3
+    const PRICE = 28000
+    const owners = [
+      { id: 'tea', name: '奶茶店', pieces: mkPieces('奶', [[600, 600], [600, 600], [600, 600], [600, 600], [300, 300], [300, 300]]) },
+      { id: 'wine', name: '烟酒店', pieces: mkPieces('烟', [[500, 700], [500, 700], [500, 500], [500, 500]]) },
+      { id: 'laundry', name: '洗衣店', pieces: mkPieces('洗', [[400, 400], [400, 400], [400, 400]]) }
+    ]
+    const ev: string[] = []
+    let pass = true
+    for (const policy of ['actual', 'origin', 'agreed'] as const) {
+      const r = planBatchNesting(owners, { sheetW: W, sheetH: H, kerfMm: KERF, priceCents: PRICE, letPolicy: policy })
+      const ac = assertBatchAllocation(r)
+      const wc = assertRegionsWhole(r)
+      const good = r.savedSheets === 1 && r.savedCents === PRICE && ac.ok && wc.ok && r.strategy === 'A_packThenMerge'
+      pass = pass && good
+      ev.push(
+        `让料规则「${letPolicyLabel(policy)}」：分开 ${r.separateSheetCount} 张 → 合排 ${r.chosen.sheetCount} 张（省 ${r.savedSheets} 张/¥${(r.savedCents / 100).toFixed(2)}），` +
+          `A=${r.strategyA.sheetCount}张/${r.strategyA.regionCount}区，B=${r.strategyB.sheetCount}张/${r.strategyB.regionCount}区，选 ${r.strategy}；Σ分摊=${r.totalAllocatedCents}=板钱 ${r.totalCostCents}，整块=${wc.ok} ${good ? '✓' : '✗'}`
+      )
+    }
+    // 怪单价 + actual：最大余数法必须账齐到分
+    const weird = planBatchNesting(owners, { sheetW: W, sheetH: H, kerfMm: KERF, priceCents: 33333, letPolicy: 'actual' })
+    const weirdOk = weird.totalAllocatedCents === weird.totalCostCents && assertRegionsWhole(weird).ok
+    pass = pass && weirdOk
+    ev.push(`单价 33333 分（除不尽）：Σ分摊=${weird.totalAllocatedCents}，整批=${weird.totalCostCents}，零头最大余数法补分 → ${weirdOk ? '账齐 ✓' : '对不齐 ✗'}`)
+    // 超板件拦截
+    const over = planBatchNesting(
+      [
+        { id: 'a', name: '甲', pieces: mkPieces('甲', [[600, 600]]) },
+        { id: 'b', name: '乙', pieces: [{ id: 'big', label: '乙-大', wMm: 1300, hMm: 2500 }] }
+      ],
+      { sheetW: W, sheetH: H, kerfMm: KERF, priceCents: PRICE }
+    )
+    const overOk = over.oversize.length === 1 && over.oversize[0].label === '乙-大'
+    pass = pass && overOk
+    ev.push(`超板件 1300×2500 显式拦截：${over.oversize.map((p) => p.label).join('、') || '无'} ${overOk ? '✓' : '✗'}`)
+    ev.push(`冲突仲裁与走法说明已随结果输出（${weird.arbitrationNotes.length} 条仲裁、${weird.decisionNotes.length} 条决策），导出文件同口径携带。`)
+    checks.push({
+      id: 'A11',
+      title: '集中开料：多门头合排省板且整块不混家；板钱按用量分摊到分、Σ=整批；两种走法二选一准则与超板拦截',
+      pass,
+      detail: pass ? '通过' : '未通过',
+      evidence: ev
     })
   }
 

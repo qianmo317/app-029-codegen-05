@@ -482,6 +482,22 @@ svg.panel-svg {
   border: 1px solid;
 }
 
+.chip {
+  display: inline-block;
+  padding: 2px 10px;
+  margin-right: 8px;
+  border-radius: 999px;
+  background: #eef3ec;
+  font-size: 12px;
+  color: #33513d;
+}
+
+td.good,
+.good {
+  color: #1f7a3d;
+  font-weight: 600;
+}
+
 .banner.info {
   background: var(--brand-soft);
   border-color: #c8ddfb;
