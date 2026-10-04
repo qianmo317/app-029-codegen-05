@@ -296,6 +296,10 @@ function applyUnified(): void {
         <span class="hint">勾选上方项目（{{ selected.length }} 个已选）</span>
       </header>
       <div class="row" style="margin-bottom: 10px">
+        <router-link to="/batch"><button class="primary" type="button">集中开料：勾中的门头凑同一批板合排（整块拿走·逐户分摊·清单导出）</button></router-link>
+        <span class="muted">把各家板边余料凑给下一家，按门头拆回取件/裁切清单</span>
+      </div>
+      <div class="row" style="margin-bottom: 10px">
         <button :disabled="selected.length === 0" @click="applyUnified">
           把左侧「字体 / 字重 / 字号 / 对齐 / 字距比例」统一应用到所选项
         </button>

@@ -4,6 +4,7 @@
  */
 
 import testchars from '../data/testchars.json'
+import { assertBatchInvariants, computeBatch, type OwnerJob, type RemnantDecision } from './batchNesting'
 import { computeLed } from './led'
 import { clearGeometryCache, ensureFont, findFont, getGlyphGeom } from './fontLoader'
 import { computeLayout, defaultProject, textToItems, type LayoutResult } from './layout'
@@ -375,6 +376,69 @@ export async function runAcceptance(preset: Preset = defaultPreset): Promise<Acc
       pass: cmp.every((c) => c.totalCents === c.panelCents + c.ledCents + c.psuCents + c.accessoryCents + c.laborCents),
       detail: `${cmp.length} 种材质`,
       evidence: cmp.map((c) => `${c.name}：面板 ${(c.panelCents / 100).toFixed(2)} + LED ${(c.ledCents / 100).toFixed(2)} + 电源 ${(c.psuCents / 100).toFixed(2)} + 配件 ${(c.accessoryCents / 100).toFixed(2)} + 加工 ${(c.laborCents / 100).toFixed(2)} = ¥${(c.totalCents / 100).toFixed(2)}`)
+    })
+  }
+
+  // ---------- 11. 集中开料（多门头合排） ----------
+  {
+    const bspec = { wMm: 1220, hMm: 2440, kerfMm: 3, priceCents: 28000, spec: '测试板 1220×2440' }
+    const mk = (prefix: string, rows: Array<[number, number, string]>): OwnerJob['pieces'] =>
+      rows.map(([w, h, label], i) => ({ id: `${prefix}${i}`, label, wMm: w, hMm: h }))
+    const jobs: OwnerJob[] = [
+      // 独立：2 张（1100+1100 / 1000 尾余 1437）
+      { ownerId: 'a', ownerName: '甲家', pieces: mk('a', [[1200, 1100, '甲1'], [1200, 1100, '甲2'], [1200, 1000, '甲3']]) },
+      // 独立：1 张（400×6 尾余 22）
+      { ownerId: 'b', ownerName: '乙家', pieces: mk('b', Array.from({ length: 6 }, (_, i) => [1200, 400, `乙${i + 1}`] as [number, number, string])) },
+      { ownerId: 'c', ownerName: '丙家', pieces: mk('c', [[1200, 700, '丙1'], [1200, 700, '丙2']]) }
+    ]
+    const r = computeBatch(jobs, bspec, {})
+    const inv = assertBatchInvariants(r)
+    const ev: string[] = [
+      `分开排基线 ${r.baselineSheets} 张 → 合排 ${r.sheetCount} 张，省 ${r.savedSheets} 张 / ¥${(r.savedCents / 100).toFixed(2)}`,
+      `逐户：${r.owners.map((o) => `${o.ownerName} 独立${o.standaloneSheets}张→分摊¥${(o.allocatedCents / 100).toFixed(2)}(省¥${(o.savedCents / 100).toFixed(2)})`).join('；')}`,
+      `Σ各户分摊 ${r.owners.reduce((s, o) => s + o.allocatedCents, 0)} 分 = 整批 ${r.totalCents} 分（整数分、最大余额法）`,
+      `走法 B 裸排 ${r.planB.sheets} 张、${r.planB.contaminatedSheets} 张夹断；补整块约束后 ${r.planB.constrainedSheets} 张 = A`,
+      `每板每户一条连续带、件数守恒、不出界不重叠：${inv.ok ? '通过' : inv.messages.join('；')}`
+    ]
+    const saveOk = r.baselineSheets === 4 && r.sheetCount === 3 && r.savedSheets === 1 && r.savedCents === 28000
+    const sumOk = r.owners.reduce((s, o) => s + o.allocatedCents, 0) === r.totalCents
+
+    // 夹断场景：走法 B 裸排出现 A-B-A，但走法 A 板内按户收拢后仍是连续带、且省板
+    const interleave: OwnerJob[] = [
+      { ownerId: 'x', ownerName: 'X家', pieces: mk('x', [[1200, 1000, 'X1'], [1200, 100, 'X2']]) },
+      { ownerId: 'y', ownerName: 'Y家', pieces: mk('y', [[1200, 500, 'Y1'], [1200, 500, 'Y2']]) }
+    ]
+    const ri = computeBatch(interleave, bspec, {})
+    const invI = assertBatchInvariants(ri)
+    const interleaveOk =
+      ri.planB.sheets === 1 && ri.planB.contaminatedSheets === 1 && ri.planB.brokenPairs >= 1 && ri.sheetCount === 1 && invI.ok
+    ev.push(
+      `夹断用例：独立 2 张 → A/B 均 1 张（省 1）；B 裸排有 ${ri.planB.contaminatedSheets} 张 A-B-A 夹断（${ri.planB.brokenPairs} 处），` +
+        `A 板内按户收拢后各户仍是整条连续带（X 1000+100 一条、Y 500+500 一条），自检 ${invI.ok ? '通过' : '失败'}`
+    )
+
+    // 让料板三模式各自配平整批
+    const remnantSheet = r.sheets.find((s) => s.remnant)
+    let modeOk = true
+    const modeEv: string[] = []
+    if (remnantSheet) {
+      for (const mode of ['keep', 'actual', 'orig', 'ratio'] as const) {
+        const d: RemnantDecision[] = [
+          { sheetIndex: remnantSheet.index, mode, giverRatio: 0.5, receiverId: mode === 'keep' ? null : remnantSheet.remnant!.ownerId === 'a' ? 'c' : 'a' }
+        ]
+        const rm = computeBatch(jobs, bspec, { decisions: d })
+        const sum = rm.owners.reduce((s, o) => s + o.allocatedCents, 0)
+        const ok = sum === rm.totalCents && rm.owners.every((o) => Number.isInteger(o.allocatedCents))
+        modeOk = modeOk && ok
+        modeEv.push(`余料${mode}：Σ分摊 ${sum} = 整批 ${rm.totalCents}（${ok ? '平' : '不平'}）`)
+      }
+    }
+    checks.push({
+      id: 'A11',
+      title: '集中开料：整块拿走约束下合排省板省錢、按门头拆清单、分摊到分且合计一致；走法 B 夹断可识别；让料三模式都配平',
+      pass: saveOk && sumOk && inv.ok && interleaveOk && modeOk,
+      detail: `省 ${r.savedSheets} 张 / ¥${(r.savedCents / 100).toFixed(2)}；分摊平账=${sumOk}；夹断识别=${interleaveOk}；让料三模式=${modeOk}`,
+      evidence: [...ev, ...modeEv]
     })
   }
 
